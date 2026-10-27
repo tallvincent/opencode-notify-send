@@ -1,4 +1,4 @@
-# OpenCode agent notifications
+# OpenCode `notify-send`
 
 Local OpenCode V2 TypeScript plugin that sends desktop notifications for
 completed agent executions, permission requests, and questions/forms waiting
