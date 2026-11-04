@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process"
-import { homedir } from "node:os"
 import { Plugin } from "@opencode/plugin"
 
 const notificationFor = (eventType: string): string | undefined => {
@@ -34,26 +33,59 @@ const sendNotification = (message: string): void => {
   child.unref()
 }
 
+const waitToRetry = (delay: number, signal: AbortSignal): Promise<void> =>
+  new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve()
+      return
+    }
+
+    let timeout: ReturnType<typeof setTimeout>
+    const finish = () => {
+      clearTimeout(timeout)
+      signal.removeEventListener("abort", finish)
+      resolve()
+    }
+
+    timeout = setTimeout(finish, delay)
+    signal.addEventListener("abort", finish, { once: true })
+    if (signal.aborted) finish()
+  })
+
 export default Plugin.define({
   id: "finished-notification",
 
   setup(ctx) {
-    // Global plugins are instantiated per location; subscribe only once.
-    if (ctx.location.directory !== homedir()) return
-
     const controller = new AbortController()
     void (async () => {
-      try {
-        for await (const event of ctx.event.subscribe({
-          signal: controller.signal,
-        })) {
-          const message = notificationFor(event.type)
-          if (message) sendNotification(message)
-        }
-      } catch (error) {
-        if (!controller.signal.aborted) {
+      let retryDelay = 1000
+
+      while (!controller.signal.aborted) {
+        try {
+          for await (const event of ctx.event.subscribe({
+            signal: controller.signal,
+          })) {
+            retryDelay = 1000
+
+            // Each location has its own plugin lifecycle, while the event
+            // stream is server-wide. Handle only events for this location.
+            if (event.location?.directory !== ctx.location.directory) continue
+
+            const message = notificationFor(event.type)
+            if (message) sendNotification(message)
+          }
+
+          if (!controller.signal.aborted) {
+            console.error("OpenCode notification event subscription ended; reconnecting")
+          }
+        } catch (error) {
+          if (controller.signal.aborted) break
           console.error("OpenCode notification event subscription failed:", error)
         }
+
+        if (controller.signal.aborted) break
+        await waitToRetry(retryDelay, controller.signal)
+        retryDelay = Math.min(retryDelay * 2, 30_000)
       }
     })()
 
